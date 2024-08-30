@@ -171,3 +171,6 @@ def prepare(
 if __name__ == "__main__":
     from jsonargparse import CLI
     CLI(prepare)
+
+
+# Example Usage: python your_script.py --source_path ./test_data --tokenizer_path ./tokenizer.model --destination_path ./output --data_format conversation
