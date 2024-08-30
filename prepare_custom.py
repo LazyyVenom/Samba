@@ -81,16 +81,36 @@ def process_parquet_file(filepath: str, builder: packed_dataset.PackedDatasetBui
         text_ids = tokenizer.encode(text)
         builder.add_array(np.array(text_ids, dtype=builder.dtype))
 
+def process_hf_dataset(dataset, builder: packed_dataset.PackedDatasetBuilder, tokenizer: Tokenizer, data_format: str = "text"):
+    for row in tqdm(dataset):
+        if data_format == "instruction":
+            text = f"{row['instruction']} {row['input']} {row['output']}"
+        elif data_format == "conversation":
+            conversation = []
+            for turn in row['conversation']:
+                if turn['from'] == 'human':
+                    conversation.append(f"Human: {turn['value']}")
+                elif turn['from'] == 'gpt':
+                    conversation.append(f"GPT: {turn['value']}")
+            text = " ".join(conversation)
+        elif data_format == "qa":
+            text = f"Q: {row['question']} A: {row['answer']}"
+        else:
+            text = row["text"]
+        
+        text_ids = tokenizer.encode(text)
+        builder.add_array(np.array(text_ids, dtype=builder.dtype))
+
 def prepare_full(
     source_path: Union[Path, str],
     tokenizer_path: Path,
     destination_path: Path,
     chunk_size: int,
     split: str = "train",
-    data_format: str = "text",  # Added data_format parameter
+    data_format: str = "text",
     filenames_subset: List[str] = None,
     process_id: int = 0,
-    source_is_hf: bool = False,  # Flag to indicate if the source is a Hugging Face dataset
+    source_is_hf: bool = False,
 ) -> None:
     destination_path.mkdir(parents=True, exist_ok=True)
 
@@ -98,7 +118,7 @@ def prepare_full(
 
     builder = packed_dataset.PackedDatasetBuilder(
         outdir=destination_path,
-        prefix=f"{split}_dataset_{process_id}",  # Use process_id to differentiate builders
+        prefix=f"{split}_dataset_{process_id}",
         chunk_size=chunk_size,
         sep_token=tokenizer.bos_id,
         dtype="auto",
@@ -106,14 +126,11 @@ def prepare_full(
     )
 
     if source_is_hf:
-        # If the source is a Hugging Face dataset, load the dataset and process it
+        # Load and process Hugging Face dataset
         dataset = load_dataset(source_path, split=split)
-        for row in tqdm(dataset):
-            text = row["text"]
-            text_ids = tokenizer.encode(text)
-            builder.add_array(np.array(text_ids, dtype=builder.dtype))
+        process_hf_dataset(dataset, builder, tokenizer, data_format)
     else:
-        # If the source is local files, process the files accordingly
+        # Process local files
         for filepath in filenames_subset:
             print(f"Processing {filepath}")
             if filepath.endswith(".jsonl"):
@@ -131,7 +148,7 @@ def prepare(
     destination_path: Path = Path("data/output"),
     chunk_size: int = 2049 * 1024,
     split: str = "train",
-    data_format: str = "text",  # Added data_format parameter
+    data_format: str = "text",
     percentage: float = 1.0,
 ) -> None:
     import time
@@ -140,6 +157,7 @@ def prepare(
 
     if isinstance(source_path, str) and source_path.startswith("HuggingFace"):
         source_is_hf = True
+        source_path = source_path.replace('HuggingFace/')
 
     if source_is_hf:
         # If using a Hugging Face dataset, no need to glob filenames
@@ -171,6 +189,3 @@ def prepare(
 if __name__ == "__main__":
     from jsonargparse import CLI
     CLI(prepare)
-
-
-# Example Usage: python your_script.py --source_path ./test_data --tokenizer_path ./tokenizer.model --destination_path ./output --data_format conversation

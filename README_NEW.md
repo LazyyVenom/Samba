@@ -52,6 +52,9 @@ To process data in the **conversation** format:
 ```bash
 python prepare_custom.py --source_path ./test_data --tokenizer_path ./tokenizer.model --destination_path ./output --data_format conversation
 ```
+```bash
+python prepare_custom.py --source_path HuggingFace/<dataset_name> --tokenizer_path ./tokenizer.model --destination_path ./output --data_format conversation
+```
 
 ### Multiprocessing
 
