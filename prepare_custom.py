@@ -111,6 +111,10 @@ def prepare_full(
     process_id: int = 0,
     source_is_hf: bool = False,
 ) -> None:
+    
+    if filenames_subset is None:
+        filenames_subset = []
+        
     destination_path.mkdir(parents=True, exist_ok=True)
 
     tokenizer = Tokenizer(Path(tokenizer_path))
@@ -138,7 +142,7 @@ def prepare_full(
                 print(f"Unsupported file format: {filepath}")
 
 def prepare(
-    source_path: Union[Path, str],
+    source_path: Union[Path, str] = Path("data/input"),
     tokenizer_path: Union[Path, str] = "checkpoints/spiece.model",
     destination_path: Path = Path("data/output"),
     chunk_size: int = 2049 * 1024,
@@ -169,7 +173,7 @@ def prepare(
     for i, subset in enumerate(chunked_filenames):
         p = Process(
             target=prepare_full,
-            args=(source_path, tokenizer_path, destination_path, chunk_size, split, data_format, list(subset), i, source_is_hf),
+            args=(source_path, destination_path, chunk_size, tokenizer_path, split, data_format, list(subset), i, source_is_hf),
         )
         processes.append(p)
         p.start()
