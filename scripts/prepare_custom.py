@@ -26,20 +26,64 @@ from lit_gpt import Tokenizer
 try:
     from datasets import load_dataset
 except ImportError as e:
-    print('Can Not Able TO Import HuggingFace Library So can not use HuggingFace Links')
+    print('Unable to Import HuggingFace Library. Please try installing library first to use hugging face dataset directly!!!')
 
-def process_jsonl_file(filepath: str, builder: packed_dataset.PackedDatasetBuilder, tokenizer: Tokenizer):
+def process_jsonl_file(filepath: str, builder: packed_dataset.PackedDatasetBuilder, tokenizer: Tokenizer, data_type: str = "text"):
     import zstandard as zstd
     with zstd.open(open(filepath, "rb"), "rt", encoding="utf-8") as f:
         for row in tqdm(f):
-            text = json.loads(row)["text"]
+            data = json.loads(row)
+            if data_type == "instruction":
+                text = f"{data['instruction']} {data['input']} {data['output']}"
+            elif data_type == "conversation":
+                # Assuming conversation is a list of dictionaries with keys "from" and "value"
+                conversation = []
+                for turn in data['conversation']:
+                    if turn['from'] == 'human':
+                        conversation.append(f"Human: {turn['value']}")
+                    elif turn['from'] == 'gpt':
+                        conversation.append(f"GPT: {turn['value']}")
+                text = " ".join(conversation)
+            elif data_type == "qa":
+                text = f"Q: {data['question']} A: {data['answer']}"
+            else:
+                text = data["text"]
+            
             text_ids = tokenizer.encode(text)
             builder.add_array(np.array(text_ids, dtype=builder.dtype))
 
-def process_parquet_file(filepath: str, builder: packed_dataset.PackedDatasetBuilder, tokenizer: Tokenizer):
+
+def process_parquet_file(filepath: str, builder: packed_dataset.PackedDatasetBuilder, tokenizer: Tokenizer, data_type: str = "text"):
     table = pq.read_table(filepath)
-    text_column = table.column("text")
-    for text in tqdm(text_column.to_pylist()):
+    
+    if data_type == "instruction":
+        instruction_column = table.column("instruction").to_pylist()
+        input_column = table.column("input").to_pylist()
+        output_column = table.column("output").to_pylist()
+        texts = [f"{inst} {inp} {out}" for inst, inp, out in zip(instruction_column, input_column, output_column)]
+        
+    elif data_type == "conversation":
+        conversation_column = table.column("conversation").to_pylist()
+        texts = []
+        for conversation in conversation_column:
+            dialogue = []
+            for turn in conversation:  # Assuming each conversation is a list of dicts with 'from' and 'value'
+                if turn['from'] == 'human':
+                    dialogue.append(f"Human: {turn['value']}")
+                elif turn['from'] == 'gpt':
+                    dialogue.append(f"GPT: {turn['value']}")
+            texts.append(" ".join(dialogue))
+    
+    elif data_type == "qa":
+        question_column = table.column("question").to_pylist()
+        answer_column = table.column("answer").to_pylist()
+        texts = [f"Q: {q} A: {a}" for q, a in zip(question_column, answer_column)]
+        
+    else:  # Default to using a 'text' column
+        text_column = table.column("text").to_pylist()
+        texts = text_column
+    
+    for text in tqdm(texts):
         text_ids = tokenizer.encode(text)
         builder.add_array(np.array(text_ids, dtype=builder.dtype))
 
@@ -131,3 +175,9 @@ def prepare(
 if __name__ == "__main__":
     from jsonargparse import CLI
     CLI(prepare)
+
+
+"""
+USE THIS SCRIPT LIKE THIS (Check Commented code below)
+"""
+# python your_script.py --source_path /path/to/data --tokenizer_path /path/to/tokenizer --destination_path /output/path --data_format conversation
