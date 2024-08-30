@@ -1,9 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT license.
-
-# Copyright Lightning AI. Licensed under the Apache License 2.0,
-# see LICENSE file at https://github.com/Lightning-AI/litgpt/blob/main/LICENSE
-
 import json
 import glob
 import os
@@ -93,6 +87,7 @@ def prepare_full(
     destination_path: Path,
     chunk_size: int,
     split: str = "train",
+    data_format: str = "text",  # Added data_format parameter
     filenames_subset: List[str] = None,
     process_id: int = 0,
     source_is_hf: bool = False,  # Flag to indicate if the source is a Hugging Face dataset
@@ -122,9 +117,9 @@ def prepare_full(
         for filepath in filenames_subset:
             print(f"Processing {filepath}")
             if filepath.endswith(".jsonl"):
-                process_jsonl_file(filepath, builder, tokenizer)
+                process_jsonl_file(filepath, builder, tokenizer, data_format)
             elif filepath.endswith(".parquet"):
-                process_parquet_file(filepath, builder, tokenizer)
+                process_parquet_file(filepath, builder, tokenizer, data_format)
             else:
                 print(f"Unsupported file format: {filepath}")
 
@@ -136,6 +131,7 @@ def prepare(
     destination_path: Path = Path("data/output"),
     chunk_size: int = 2049 * 1024,
     split: str = "train",
+    data_format: str = "text",  # Added data_format parameter
     percentage: float = 1.0,
 ) -> None:
     import time
@@ -161,7 +157,7 @@ def prepare(
     for i, subset in enumerate(chunked_filenames):
         p = Process(
             target=prepare_full,
-            args=(source_path, tokenizer_path, destination_path, chunk_size, split, list(subset), i, source_is_hf),
+            args=(source_path, tokenizer_path, destination_path, chunk_size, split, data_format, list(subset), i, source_is_hf),
         )
         processes.append(p)
         p.start()
@@ -175,9 +171,3 @@ def prepare(
 if __name__ == "__main__":
     from jsonargparse import CLI
     CLI(prepare)
-
-
-"""
-USE THIS SCRIPT LIKE THIS (Check Commented code below)
-"""
-# python your_script.py --source_path /path/to/data --tokenizer_path /path/to/tokenizer --destination_path /output/path --data_format conversation
