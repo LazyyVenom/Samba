@@ -20,7 +20,7 @@ from lit_gpt import Tokenizer
 try:
     from datasets import load_dataset
 except ImportError as e:
-    print('Unable to Import HuggingFace Library. Please try installing library first to use hugging face dataset directly!!!')
+    print('Unable to Import HuggingFace Library. Please try installing the library first to use Hugging Face datasets directly!!!')
 
 def process_jsonl_file(filepath: str, builder: packed_dataset.PackedDatasetBuilder, tokenizer: Tokenizer, data_type: str = "text"):
     import zstandard as zstd
@@ -30,7 +30,6 @@ def process_jsonl_file(filepath: str, builder: packed_dataset.PackedDatasetBuild
             if data_type == "instruction":
                 text = f"{data['instruction']} {data['input']} {data['output']}"
             elif data_type == "conversation":
-                # Assuming conversation is a list of dictionaries with keys "from" and "value"
                 conversation = []
                 for turn in data['conversation']:
                     if turn['from'] == 'human':
@@ -61,7 +60,7 @@ def process_parquet_file(filepath: str, builder: packed_dataset.PackedDatasetBui
         texts = []
         for conversation in conversation_column:
             dialogue = []
-            for turn in conversation:  # Assuming each conversation is a list of dicts with 'from' and 'value'
+            for turn in conversation:
                 if turn['from'] == 'human':
                     dialogue.append(f"Human: {turn['value']}")
                 elif turn['from'] == 'gpt':
@@ -73,7 +72,7 @@ def process_parquet_file(filepath: str, builder: packed_dataset.PackedDatasetBui
         answer_column = table.column("answer").to_pylist()
         texts = [f"Q: {q} A: {a}" for q, a in zip(question_column, answer_column)]
         
-    else:  # Default to using a 'text' column
+    else:
         text_column = table.column("text").to_pylist()
         texts = text_column
     
@@ -103,9 +102,9 @@ def process_hf_dataset(dataset, builder: packed_dataset.PackedDatasetBuilder, to
 
 def prepare_full(
     source_path: Union[Path, str],
-    tokenizer_path: Path,
     destination_path: Path,
     chunk_size: int,
+    tokenizer_path: Union[Path, str] = "checkpoints/spiece.model",
     split: str = "train",
     data_format: str = "text",
     filenames_subset: List[str] = None,
@@ -114,7 +113,7 @@ def prepare_full(
 ) -> None:
     destination_path.mkdir(parents=True, exist_ok=True)
 
-    tokenizer = Tokenizer(tokenizer_path)
+    tokenizer = Tokenizer(Path(tokenizer_path))
 
     builder = packed_dataset.PackedDatasetBuilder(
         outdir=destination_path,
@@ -126,11 +125,9 @@ def prepare_full(
     )
 
     if source_is_hf:
-        # Load and process Hugging Face dataset
         dataset = load_dataset(source_path, split=split)
         process_hf_dataset(dataset, builder, tokenizer, data_format)
     else:
-        # Process local files
         for filepath in filenames_subset:
             print(f"Processing {filepath}")
             if filepath.endswith(".jsonl"):
@@ -140,11 +137,9 @@ def prepare_full(
             else:
                 print(f"Unsupported file format: {filepath}")
 
-    # builder.write_reminder()  # As mentioned in the comment, we avoid writing the final corpus to prevent unnecessary tokens
-
 def prepare(
     source_path: Union[Path, str],
-    tokenizer_path: Path = Path("checkpoints/lit-llama/tokenizer.model"),
+    tokenizer_path: Union[Path, str] = "checkpoints/spiece.model",
     destination_path: Path = Path("data/output"),
     chunk_size: int = 2049 * 1024,
     split: str = "train",
@@ -157,10 +152,9 @@ def prepare(
 
     if isinstance(source_path, str) and source_path.startswith("HuggingFace"):
         source_is_hf = True
-        source_path = source_path.replace('HuggingFace/')
+        source_path = source_path.replace('HuggingFace/', '')
 
     if source_is_hf:
-        # If using a Hugging Face dataset, no need to glob filenames
         filenames = None
     else:
         filenames = glob.glob(os.path.join(source_path, f"**/*.{split}.*"), recursive=True)
