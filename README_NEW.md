@@ -32,7 +32,7 @@ pip install numpy tqdm pyarrow zstandard jsonargparse datasets
 ### Basic Usage
 
 ```bash
-python your_script.py --source_path <source_path> --tokenizer_path <tokenizer_path> --destination_path <destination_path> --data_format <data_format>
+python prepare_custom.py --source_path <source_path> --tokenizer_path <tokenizer_path> --destination_path <destination_path> --data_format <data_format>
 ```
 
 ### Parameters
@@ -50,7 +50,7 @@ python your_script.py --source_path <source_path> --tokenizer_path <tokenizer_pa
 To process data in the **conversation** format:
 
 ```bash
-python your_script.py --source_path ./test_data --tokenizer_path ./tokenizer.model --destination_path ./output --data_format conversation
+python prepare_custom.py --source_path ./test_data --tokenizer_path ./tokenizer.model --destination_path ./output --data_format conversation
 ```
 
 ### Multiprocessing
