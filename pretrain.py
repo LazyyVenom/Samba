@@ -30,6 +30,10 @@ from lit_gpt import FusedCrossEntropyLoss
 import random
 import os
 
+#Suppressing Warnings
+import warnings
+warnings.filterwarnings("ignore")
+
 model_name = "Samba_421M" # change to "Samba_1.3B" for 1.3B model
 train_config = "tsz512x4k_20B" # chanage to "tsz512x4k_100B" for 1.3B model
 name = train_config +"_" + model_name
