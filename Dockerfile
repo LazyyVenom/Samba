@@ -20,3 +20,11 @@ RUN pip install -U --index-url https://aiinfra.pkgs.visualstudio.com/PublicPacka
 RUN pip install einops
 RUN pip install opt_einsum
 RUN pip install -U git+https://github.com/sustcsonglin/flash-linear-attention@98c176e
+Run pip install datasets
+WORKDIR ../
+WORKDIR ../
+WORKDIR ../
+Copy lit_gpt lit_gpt
+COPY prepare_custom.py prepare_custom.py
+COPY pretrain.py pretrain.py
+COPY spiece.model tokenizer.model
