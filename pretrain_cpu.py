@@ -26,7 +26,7 @@ import os
 
 # Suppressing Warnings
 import warnings
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=FutureWarning, module='torch')
 
 model_name = "Samba_421M"  # change to "Samba_1.3B" for 1.3B model
 train_config = "tsz512x4k_20B"  # change to "tsz512x4k_100B" for 1.3B model
@@ -102,7 +102,8 @@ def setup(
 ) -> None:
     
     # Use CPU for training
-    fabric = L.Fabric(devices="cpu", precision="bf16-mixed", loggers=[wandb_logger])
+    cpu_cores = 4
+    fabric = L.Fabric(devices=cpu_cores, precision="bf16-mixed", loggers=[wandb_logger])
     fabric.launch()
     fabric.print(hparams)
     fabric.logger.log_hyperparams(hparams)
@@ -266,20 +267,38 @@ def create_dataloaders(
     seed: int,
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
     random.seed(seed)
-    train_datasets = [PackedDataset(Path(train_data_dir) / f"{dataset}.pkl") for dataset, _ in train_data_config]
-    train_dataset = CombinedDataset(train_datasets)
+    n_chunks = 10  # Replace with appropriate value
+    block_size = 1024  # Replace with appropriate value
+
+    train_datasets = [
+        PackedDataset(Path(train_data_dir) / f"{dataset}.bin", n_chunks=n_chunks, block_size=block_size)
+        for dataset, _ in train_data_config
+    ]
+    train_dataset = CombinedDataset(train_datasets, seed=69)
+    
+    # Determine if the dataset is an IterableDataset
+    is_iterable = isinstance(train_dataset, torch.utils.data.IterableDataset)
+    
+    # Set shuffle only if the dataset is not an IterableDataset
     train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=4
+        train_dataset, batch_size=batch_size, shuffle=not is_iterable, drop_last=True, num_workers=4
     )
+    
     val_dataloader = None
     if val_data_dir:
-        val_datasets = [PackedDataset(Path(val_data_dir) / f"{dataset}.pkl") for dataset, _ in val_data_config]
-        val_dataset = CombinedDataset(val_datasets)
+        val_datasets = [PackedDataset(Path(val_data_dir) / f"{dataset}.bin", n_chunks=n_chunks, block_size=block_size) for dataset, _ in val_data_config]
+        val_dataset = CombinedDataset(val_datasets, seed=69)
+        
+        # Determine if the dataset is an IterableDataset
+        is_iterable = isinstance(val_dataset, torch.utils.data.IterableDataset)
+        
+        # Set shuffle only if the dataset is not an IterableDataset
         val_dataloader = DataLoader(
-            val_dataset, batch_size=batch_size, shuffle=False, drop_last=False, num_workers=4
+            val_dataset, batch_size=batch_size, shuffle=not is_iterable, drop_last=False, num_workers=4
         )
 
     return train_dataloader, val_dataloader
+
 
 if __name__ == "__main__":
     train_data_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("data")
