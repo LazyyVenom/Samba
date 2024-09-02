@@ -1,241 +1,288 @@
-import json
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
+# Copyright Lightning AI. Licensed under the Apache License 2.0,
+# see LICENSE file at https://github.com/Lightning-AI/litgpt/blob/main/LICENSE
+
 import glob
-import os
+import math
 import sys
+import time
 from pathlib import Path
-from typing import List, Union
-import numpy as np
-from tqdm import tqdm
-from multiprocessing import Process, cpu_count
-import pyarrow.parquet as pq
+from typing import Optional, Tuple, Union
+import lightning as L
+import torch
+from torch.utils.data import DataLoader
+from functools import partial
+from lit_gpt.model import GPT, Block, MBlock, Config
+from lit_gpt.packed_dataset import CombinedDataset, PackedDataset
+from lit_gpt.speed_monitor import SpeedMonitorFabric as Monitor
+from lit_gpt.speed_monitor import estimate_flops
+from lit_gpt.utils import chunked_cross_entropy, num_parameters
+from pytorch_lightning.loggers import WandbLogger
+from lit_gpt import FusedCrossEntropyLoss
+import random
+import os
 
-#Suppressing Warnings
+# Suppressing Warnings
 import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore")
 
-# support running without installing as a package
-wd = Path(__file__).parent.parent.resolve()
-sys.path.append(str(wd))
+model_name = "Samba_421M"  # change to "Samba_1.3B" for 1.3B model
+train_config = "tsz512x4k_20B"  # change to "tsz512x4k_100B" for 1.3B model
+name = train_config + "_" + model_name
 
-import lit_gpt.packed_dataset as packed_dataset
-from lit_gpt import Tokenizer
+out_dir = Path(os.getenv("LIGHTNING_ARTIFACTS_DIR", "out")) / name
 
-# Import necessary libraries for Hugging Face datasets
-try:
-    from datasets import load_dataset
-except ImportError as e:
-    print('Unable to Import HuggingFace Library. Please try installing the library first to use Hugging Face datasets directly!!!')
+# Hyperparameters
+if "20B" in name:
+    nodes = 1
+    max_tokens = int(1e11) // 5
+elif "100B" in name:
+    nodes = 8
+    max_tokens = int(1e11)
 
-def process_jsonl_file(filepath: str, builder: packed_dataset.PackedDatasetBuilder, tokenizer: Tokenizer, data_type: str = "text"):
-    if filepath.endswith('.jsonl'):
-        import zstandard as zstd
-        with zstd.open(open(filepath, "rb"), "rt", encoding="utf-8") as f:
-            for row in tqdm(f):
-                data = json.loads(row)
-                if data_type == "instruction":
-                    text = f"{data['instruction']} {data['input']} {data['output']}"
-                elif data_type == "conversation":
-                    conversation = []
-                    for turn in data['conversation']:
-                        if turn['from'] == 'human':
-                            conversation.append(f"Human: {turn['value']}")
-                        elif turn['from'] == 'gpt':
-                            conversation.append(f"GPT: {turn['value']}")
-                    text = " ".join(conversation)
-                elif data_type == "qa":
-                    text = f"Q: {data['question']} A: {data['answer']}"
-                else:
-                    text = data["text"]
-            
-                text_ids = tokenizer.encode(text)
-                builder.add_array(np.array(text_ids, dtype=builder.dtype))
-    
-    else:
-        with open(filepath, "r", encoding="utf-8") as f:
-            data = json.load(f)  # Load the JSON data
-            for entry in tqdm(data, desc=f"Processing {os.path.basename(filepath)}"):
-                try:
-                    if data_type == "instruction":
-                        text = f"{entry['instruction']} {entry['input']} {entry['output']}"
-                    elif data_type == "conversation":
-                        conversation = []
-                        for turn in entry['conversation']:
-                            if turn['from'] == 'human':
-                                conversation.append(f"Human: {turn['value']}")
-                            elif turn['from'] == 'gpt':
-                                conversation.append(f"GPT: {turn['value']}")
-                        text = " ".join(conversation)
-                    elif data_type == "qa":
-                        text = f"Q: {entry['question']} A: {entry['answer']}"
-                    else:
-                        text = entry["text"]
+if "512x4k" in name:
+    global_batch_size = 512 // nodes
+    micro_batch_size = 8
+elif "256x8k" in name:
+    global_batch_size = 256 // nodes
+    micro_batch_size = 4
+elif "128x16k" in name:
+    global_batch_size = 128 // nodes
+    micro_batch_size = 2
+elif "64x32k" in name:
+    global_batch_size = 64 // nodes
+    micro_batch_size = 1
+elif "1024x2k" in name:
+    global_batch_size = 1024 // nodes
+    micro_batch_size = 16
 
-                    text_ids = tokenizer.encode(text)
-                    builder.add_array(np.array(text_ids, dtype=builder.dtype))
-                except KeyError as e:
-                    print(f"Missing key {e} in entry: {entry}")
-                except Exception as e:
-                    print(f"Unexpected error processing entry {entry}: {e}")
+learning_rate = 4e-4
+
+total_evals = 400
+warmup_tokens = int(max_tokens * 0.01)
+log_step_interval = 10
+eval_iters = total_evals // micro_batch_size
+save_step_interval = 1000
+eval_step_interval = 1000
+
+num_extrapol = 4
+
+weight_decay = 1e-1
+beta1 = 0.9
+beta2 = 0.95
+grad_clip = 1.0
+decay_lr = True
+min_lr = learning_rate / 10
+
+batch_size = global_batch_size
+gradient_accumulation_steps = batch_size // micro_batch_size
+assert gradient_accumulation_steps > 0
+
+log_iter_interval = log_step_interval * gradient_accumulation_steps
+
+train_data_config = [
+    ("train_slim", 1.0),
+]
+
+val_data_config = [
+    ("validation", 1.0),
+]
+
+hparams = {k: v for k, v in locals().items() if isinstance(v, (int, float, str)) and not k.startswith("_")}
+
+wandb_logger = WandbLogger(project="pretrain-LLM")
 
 
-def process_parquet_file(filepath: str, builder: packed_dataset.PackedDatasetBuilder, tokenizer: Tokenizer, data_type: str = "text"):
-    table = pq.read_table(filepath)
-    
-    if data_type == "instruction":
-        instruction_column = table.column("instruction").to_pylist()
-        input_column = table.column("input").to_pylist()
-        output_column = table.column("output").to_pylist()
-        texts = [f"{inst} {inp} {out}" for inst, inp, out in zip(instruction_column, input_column, output_column)]
-        
-    elif data_type == "conversation":
-        conversation_column = table.column("conversation").to_pylist()
-        texts = []
-        for conversation in conversation_column:
-            dialogue = []
-            for turn in conversation:
-                if turn['from'] == 'human':
-                    dialogue.append(f"Human: {turn['value']}")
-                elif turn['from'] == 'gpt':
-                    dialogue.append(f"GPT: {turn['value']}")
-            texts.append(" ".join(dialogue))
-    
-    elif data_type == "qa":
-        question_column = table.column("question").to_pylist()
-        answer_column = table.column("answer").to_pylist()
-        texts = [f"Q: {q} A: {a}" for q, a in zip(question_column, answer_column)]
-        
-    else:
-        text_column = table.column("text").to_pylist()
-        texts = text_column
-    
-    for text in tqdm(texts):
-        text_ids = tokenizer.encode(text)
-        builder.add_array(np.array(text_ids, dtype=builder.dtype))
-
-def process_hf_dataset(dataset, builder: packed_dataset.PackedDatasetBuilder, tokenizer: Tokenizer, data_format: str = "text"):
-    for row in tqdm(dataset):
-        if data_format == "instruction":
-            text = f"{row['instruction']} {row['input']} {row['output']}"
-        elif data_format == "conversation":
-            conversation = []
-            for turn in row['conversation']:
-                if turn['from'] == 'human':
-                    conversation.append(f"Human: {turn['value']}")
-                elif turn['from'] == 'gpt':
-                    conversation.append(f"GPT: {turn['value']}")
-            text = " ".join(conversation)
-        elif data_format == "qa":
-            text = f"Q: {row['question']} A: {row['answer']}"
-        else:
-            text = row["text"]
-        
-        text_ids = tokenizer.encode(text)
-        builder.add_array(np.array(text_ids, dtype=builder.dtype))
-
-def prepare_full(
-    source_path: Union[Path, str],
-    destination_path: Path,
-    chunk_size: int,
-    tokenizer_path: Union[Path, str] = "./",
-    split: str = "train",
-    data_format: str = "text",
-    filenames_subset: List[str] = None,
-    process_id: int = 0,
-    source_is_hf: bool = False,
+def setup(
+    train_data_dir: Path = Path("data/redpajama_sample"),
+    val_data_dir: Optional[Path] = None,
+    resume: Union[bool, Path] = False,
 ) -> None:
     
-    if filenames_subset is None:
-        filenames_subset = []
+    # Use CPU for training
+    fabric = L.Fabric(devices="cpu", precision="bf16-mixed", loggers=[wandb_logger])
+    fabric.launch()
+    fabric.print(hparams)
+    fabric.logger.log_hyperparams(hparams)
+
+    main(fabric, train_data_dir, val_data_dir, resume,)
+
+
+def main(fabric, train_data_dir, val_data_dir, resume, **overrides):
+    monitor = Monitor(fabric, window_size=2, time_unit="seconds", log_iter_interval=log_iter_interval)
+
+    if fabric.global_rank == 0:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    config = Config.from_name(model_name, **overrides)
+
+    train_dataloader, val_dataloader = create_dataloaders(
+        batch_size=micro_batch_size,
+        block_size=config.block_size,
+        fabric=fabric,
+        train_data_dir=train_data_dir,
+        val_data_dir=val_data_dir,
+        seed=3407,
+    )
+    if val_dataloader is None:
+        train_dataloader = fabric.setup_dataloaders(train_dataloader)
+    else:
+        train_dataloader, val_dataloader = fabric.setup_dataloaders(train_dataloader, val_dataloader)
+
+    fabric.seed_everything(3407)
+
+    fabric.print(f"Loading model with {config.__dict__}")
+    t0 = time.perf_counter()
+    with fabric.init_module(empty_init=False):
+        model = GPT(config)
+        model.apply(partial(model._init_weights, n_layer=config.n_layer))
+ 
+    fabric.print(f"Time to instantiate model: {time.perf_counter() - t0:.02f} seconds.")
+    fabric.print(f"Total parameters {num_parameters(model):,}")
+    fabric.print(model)
+    
+    model = fabric.setup(model)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=learning_rate, weight_decay=weight_decay, betas=(beta1, beta2), fused=True
+    )
+    optimizer = fabric.setup_optimizers(optimizer)
+
+    state = {"model": model, "optimizer": optimizer, "hparams": hparams, "iter_num": 0, "step_count": 0}
+
+    if resume is True:
+        resume = sorted(out_dir.glob("*.pth"))[-1]
+    if resume:
+        fabric.print(f"Resuming training from {resume}")
+        fabric.load(resume, state)
+
+    train_time = time.perf_counter()
+    train(fabric, state, train_dataloader, val_dataloader, monitor, resume)
+    fabric.print(f"Training time: {(time.perf_counter() - train_time):.2f}s")
+
+
+def train(fabric, state, train_dataloader, val_dataloader, monitor, resume):
+    model = state["model"]
+    optimizer = state["optimizer"]
+
+    if val_dataloader is not None:
+        validate(fabric, model, val_dataloader)  # sanity check
+
+    total_lengths = 0
+    total_t0 = time.perf_counter()
+
+    max_tokens_per_device = max_tokens
+    tokens_per_iter = micro_batch_size * model.config.block_size
+    max_iters = max_tokens_per_device // tokens_per_iter
+    warmup_iters = warmup_tokens // tokens_per_iter
+    initial_iter = state["iter_num"]
+    curr_iter = 0
+            
+    loss_func = FusedCrossEntropyLoss()
+    for train_data in train_dataloader:
+        if resume:
+            if curr_iter < initial_iter:
+                curr_iter += 1
+                continue
+            else:
+                resume = False
+                curr_iter = -1
+                fabric.print("resume finished, taken {} seconds".format(time.perf_counter() - total_t0))
+        if state["iter_num"] >= max_iters:
+            break
         
-    destination_path.mkdir(parents=True, exist_ok=True)
+        lr = get_lr(state["iter_num"], warmup_iters, max_iters) if decay_lr else learning_rate
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
 
-    tokenizer = Tokenizer(Path(tokenizer_path))
+        iter_t0 = time.perf_counter()
 
-    builder = packed_dataset.PackedDatasetBuilder(
-        outdir=destination_path,
-        prefix=f"{split}_dataset_{process_id}",
-        chunk_size=chunk_size,
-        sep_token=tokenizer.bos_id,
-        dtype="auto",
-        vocab_size=tokenizer.vocab_size,
+        input_ids = train_data[:, 0: model.config.block_size].contiguous()
+        targets = train_data[:, 1: model.config.block_size + 1].contiguous()
+        is_accumulating = (state["iter_num"] + 1) % gradient_accumulation_steps != 0
+        with fabric.no_backward_sync(model, enabled=is_accumulating):
+            logits = model(input_ids)
+            loss = loss_func(logits, targets)
+            fabric.backward(loss / gradient_accumulation_steps)
+
+        if not is_accumulating:
+            fabric.clip_gradients(model, optimizer, max_norm=grad_clip)
+            optimizer.step()
+            optimizer.zero_grad()
+            state["step_count"] += 1
+        state["iter_num"] += 1
+        total_lengths += input_ids.size(1)
+        t1 = time.perf_counter()
+        fabric.print(
+                f"iter {state['iter_num']} step {state['step_count']}: loss {loss.item():.4f}, iter time:"
+                f" {(t1 - iter_t0) * 1000:.2f}ms{' (optimizer.step)' if not is_accumulating else ''}"
+                f" remaining time: {(t1 - total_t0) / (state['iter_num'] - initial_iter) * (max_iters - state['iter_num']) / 3600:.2f} hours. " 
+                f" or {(t1 - total_t0) / (state['iter_num'] - initial_iter) * (max_iters - state['iter_num']):.2f} seconds"
+        )
+
+        if state["iter_num"] % save_step_interval == 0:
+            fabric.save(out_dir / f"checkpoint_{state['iter_num']}.pth", state)
+
+        if state["iter_num"] % eval_step_interval == 0 and val_dataloader:
+            validate(fabric, model, val_dataloader)
+    
+    fabric.print(f"Training took {(time.perf_counter() - total_t0) / 3600:.2f} hours")
+
+
+def validate(fabric, model, val_dataloader):
+    model.eval()
+    val_loss = 0.0
+    val_iters = len(val_dataloader)
+    with torch.no_grad():
+        for i, val_data in enumerate(val_dataloader):
+            input_ids = val_data[:, 0: model.config.block_size].contiguous()
+            targets = val_data[:, 1: model.config.block_size + 1].contiguous()
+            logits = model(input_ids)
+            loss = chunked_cross_entropy(logits, targets)
+            val_loss += loss.item()
+            if (i + 1) % log_step_interval == 0:
+                fabric.print(f"Validation iter {i + 1}/{val_iters}: loss {loss.item():.4f}")
+
+    model.train()
+    fabric.print(f"Validation loss: {val_loss / val_iters:.4f}")
+
+
+def get_lr(iter_num: int, warmup_iters: int, max_iters: int) -> float:
+    if iter_num < warmup_iters:
+        return learning_rate * (iter_num / warmup_iters)
+    return max(
+        learning_rate * 0.5 * (1 + math.cos(math.pi * (iter_num - warmup_iters) / (max_iters - warmup_iters))),
+        min_lr,
     )
 
-    if source_is_hf:
-        dataset = load_dataset(source_path, split=split)
-        process_hf_dataset(dataset, builder, tokenizer, data_format)
-    else:
-        for filepath in filenames_subset:
-            print(f"Processing {filepath}")
-            if filepath.endswith(".jsonl") or filepath.endswith(".json"):
-                process_jsonl_file(os.path.join(source_path,filepath), builder, tokenizer, data_format)
-            elif filepath.endswith(".parquet"):
-                process_parquet_file(filepath, builder, tokenizer, data_format)
-            else:
-                print(f"Unsupported file format: {filepath}")
 
-def prepare(
-    source_path: Union[Path, str] = Path("data/input"),
-    tokenizer_path: Union[Path, str] = "./",
-    destination_path: Path = Path("data/output"),
-    chunk_size: int = 2049 * 1024,
-    split: str = "train",
-    data_format: str = "text",
-    percentage: float = 1.0,
-) -> None:
-    import time
-
-    source_is_hf = False
-
-    if isinstance(source_path, str) and source_path.startswith("HuggingFace"):
-        print("HuggingFace H Bawa")
-        source_is_hf = True
-        source_path = source_path.replace('HuggingFace/', '')
-
-    else:
-        print("This Is Source Path:", source_path)
-        print("ITS A PATH")
-        
-        
-    if source_is_hf:
-        filenames = None
-    else:
-        import os
-        # print("Current working directory:", os.getcwd())
-        # print(os.listdir(os.getcwd()))
-        filenames = os.listdir(source_path)
-        # print(filenames)
-        temp = []
-        for filename in filenames:
-            if filename.endswith(".json") or filename.endswith(".jsonl") or filename.endswith(".parquet"):
-                temp.append(filename)
-        filenames = temp
-        # print(filenames)
-        filenames = filenames[:int(len(filenames) * percentage)]
-        # print(filenames)
-
-    num_processes = cpu_count()
-    chunked_filenames = np.array_split(filenames, num_processes) if filenames else [None] * num_processes
-
-    processes = []
-    start_time = time.time()
-
-    for i, subset in enumerate(chunked_filenames):
-        if subset is None:  # Skip process creation if there's nothing to process
-            continue
-        p = Process(
-            target=prepare_full,
-            args=(source_path, destination_path, chunk_size, tokenizer_path, split, data_format, list(subset), i, source_is_hf),
+def create_dataloaders(
+    batch_size: int,
+    block_size: int,
+    fabric: L.Fabric,
+    train_data_dir: Path,
+    val_data_dir: Optional[Path],
+    seed: int,
+) -> Tuple[DataLoader, Optional[DataLoader]]:
+    random.seed(seed)
+    train_datasets = [PackedDataset(Path(train_data_dir) / f"{dataset}.pkl") for dataset, _ in train_data_config]
+    train_dataset = CombinedDataset(train_datasets)
+    train_dataloader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=4
+    )
+    val_dataloader = None
+    if val_data_dir:
+        val_datasets = [PackedDataset(Path(val_data_dir) / f"{dataset}.pkl") for dataset, _ in val_data_config]
+        val_dataset = CombinedDataset(val_datasets)
+        val_dataloader = DataLoader(
+            val_dataset, batch_size=batch_size, shuffle=False, drop_last=False, num_workers=4
         )
-        processes.append(p)
-        p.start()
 
-    for p in processes:
-        p.join()
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    print(f"Time taken: {elapsed_time:.2f} seconds")
-
+    return train_dataloader, val_dataloader
 
 if __name__ == "__main__":
-    from jsonargparse import CLI
-    CLI(prepare)
+    train_data_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("data")
+    val_data_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else None
+    resume = sys.argv[3] if len(sys.argv) > 3 else False
+    setup(train_data_dir, val_data_dir, resume)
