@@ -186,16 +186,17 @@ def prepare(
 
     source_is_hf = False
 
-    if isinstance(source_path, str) and source_path.startswith("HuggingFace"):
-        print("HuggingFace H Bawa")
+    if str(source_path).startswith("HuggingFace"):
+        print("HuggingFace Dataset")
         source_is_hf = True
-        source_path = source_path.replace('HuggingFace/', '')
+        source_path = str(source_path).replace('HuggingFace/', '')
 
     else:
         print("This Is Source Path:", source_path)
         
     if source_is_hf:
         filenames = None
+        
     else:
         import os
         # print("Current working directory:", os.getcwd())
@@ -217,6 +218,14 @@ def prepare(
     processes = []
     start_time = time.time()
 
+    if source_is_hf:
+        p = Process(
+            target=prepare_full,
+            args=(source_path, destination_path, chunk_size, tokenizer_path, split, data_format, None, 0, source_is_hf),
+        )
+        processes.append(p)
+        p.start()
+    
     for i, subset in enumerate(chunked_filenames):
         if subset is None:  # Skip process creation if there's nothing to process
             continue
