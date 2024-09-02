@@ -200,18 +200,18 @@ def prepare(
         filenames = None
     else:
         import os
-        print("Current working directory:", os.getcwd())
-        print(os.listdir(os.getcwd()))
+        # print("Current working directory:", os.getcwd())
+        # print(os.listdir(os.getcwd()))
         filenames = os.listdir(source_path)
-        print(filenames)
+        # print(filenames)
         temp = []
         for filename in filenames:
             if filename.endswith(".json") or filename.endswith(".jsonl") or filename.endswith(".parquet"):
                 temp.append(filename)
         filenames = temp
-        print(filenames)
+        # print(filenames)
         filenames = filenames[:int(len(filenames) * percentage)]
-        print(filenames)
+        # print(filenames)
 
     num_processes = cpu_count()
     chunked_filenames = np.array_split(filenames, num_processes) if filenames else [None] * num_processes
