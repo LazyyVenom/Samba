@@ -55,12 +55,12 @@ Add the required file directory inside of this.
 
 Preprocessing Dataset (Training)
 ```bash
-python prepare_custom.py --source_path HuggingFace/yamaha/apache --destination_path output_apache --data_format instruction
+python prepare_custom.py --source_path HuggingFace/yahma/alpaca-cleaned --destination_path output_apache --data_format instruction
 ```
 
 Preprocessing Dataset (Validation)
 ```bash
-python prepare_custom.py --source_path HuggingFace/yamaha/apache --destination_path output_apache_val --data_format instruction --split validation
+python prepare_custom.py --source_path HuggingFace/yahma/alpaca-cleaned --destination_path output_apache_val --data_format instruction --split validation
 ```
 
 For Our Purpose we Need (instruction)
@@ -80,14 +80,17 @@ Line Number - (416) torch.backends.cuda.enable_flash_sdp(False)
 ## FOR FineWeb INSTRUCTION ONE-
 ### Running Script
 
+Download Files as per need and Place it in a folder - /fine_web_train and /fine_web_val
+Make sure these folders are inside of docker container.
+
 Preprocessing Dataset (Training)
 ```bash
-python prepare_custom.py --source_path HuggingFace/yamaha/apache --destination_path output_fine --data_format instruction
+python prepare_custom.py --source_path ./fine_web_train --destination_path output_fine --data_format instruction
 ```
 
 Preprocessing Dataset (Validation)
 ```bash
-python prepare_custom.py --source_path HuggingFace/yamaha/apache --destination_path output_fine_val --data_format instruction --split validation
+python prepare_custom.py --source_path ./fine_web_val --destination_path output_fine_val --data_format instruction --split validation
 ```
 
 For Our Purpose we Need (instruction)
@@ -97,7 +100,7 @@ It will pre process it accordingly.)
 
 Training Script 
 ```bash
-torchrun --nnodes=1 --nproc_per_node=8 --rdzv_id=samba-421M --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29500 pretrain.py --train_data_dir output_apache --val_data_dir output_apache_val
+torchrun --nnodes=1 --nproc_per_node=8 --rdzv_id=samba-421M --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29500 pretrain.py --train_data_dir output_fine --val_data_dir output_fine_val
 ```
 
 Uncomment this line if you see an error: "Expected is_sm80 to be true, but got false"
