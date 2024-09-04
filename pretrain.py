@@ -29,6 +29,7 @@ from pytorch_lightning.loggers import WandbLogger
 from lit_gpt import FusedCrossEntropyLoss
 import random
 import os
+os.environ["WANDB_MODE"] = "dryrun"
 
 #Suppressing Warnings
 import warnings

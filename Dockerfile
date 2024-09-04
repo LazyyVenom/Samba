@@ -24,7 +24,7 @@ Run pip install datasets
 WORKDIR ../
 WORKDIR ../
 WORKDIR ../
-Copy lit_gpt lit_gpt
+COPY lit_gpt lit_gpt
 COPY prepare_custom.py prepare_custom.py
 COPY pretrain.py pretrain.py
 COPY spiece.model tokenizer.model
